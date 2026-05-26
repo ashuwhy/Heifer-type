@@ -69,7 +69,7 @@ let rec string_of_core_type (p:core_type) :string =
     List.fold_left (fun acc a -> acc ^ a) "" (Longident.flatten l.txt)^
     List.fold_left (fun acc a -> acc ^ string_of_core_type a) "" c_li
   | Ttyp_tuple (ctLi) -> "(" ^
-    (List.fold_left (fun acc a -> acc ^ "," ^ string_of_core_type a ) "" ctLi) ^ ")"
+    (List.fold_left (fun acc (_, a) -> acc ^ "," ^ string_of_core_type a ) "" ctLi) ^ ")"
 
   | Ttyp_poly (str_li, c) -> 
     "type " ^ List.fold_left (fun acc a -> acc ^ a) "" str_li ^ ". " ^
@@ -116,7 +116,7 @@ let rec expr_to_term (expr:expression) : term =
     match expr.exp_desc with
     | Texp_constant (Const_int num) -> Const (Num num )
     | Texp_ident (_, ident, _) -> Var (String.concat "." (Longident.flatten ident.txt))
-    | Texp_apply ({exp_desc = Texp_ident (_, {txt=Lident i; _}, _); _}, [(_, Some a); (_, Some b)]) ->
+    | Texp_apply ({exp_desc = Texp_ident (_, {txt=Lident i; _}, _); _}, [(_, Arg a); (_, Arg b)]) ->
         let op = begin match i with
         | "^" -> fun lhs rhs -> BinOp (SConcat, lhs, rhs)
         | "+" -> fun lhs rhs -> BinOp (Plus, lhs, rhs)
@@ -139,11 +139,11 @@ let rec expr_to_term (expr:expression) : term =
 (* TODO: expr_to_formula *)
 let rec expr_to_formula (expr : expression) : pi * kappa =
   match expr.exp_desc with
-  | Texp_apply ({exp_desc = Texp_ident (_, {txt=Lident i; _}, _); _}, [(_, Some a); (_, Some b)]) ->
+  | Texp_apply ({exp_desc = Texp_ident (_, {txt=Lident i; _}, _); _}, [(_, Arg a); (_, Arg b)]) ->
     begin match i with
     | "=" ->
       begin match a.exp_desc with
-      | Texp_apply({exp_desc = Texp_ident(_, {txt=Lident "!"; _}, _); _}, [_, Some {exp_desc = Texp_ident(_, {txt=Lident p; _}, _); _}]) -> 
+      | Texp_apply({exp_desc = Texp_ident(_, {txt=Lident "!"; _}, _); _}, [_, Arg {exp_desc = Texp_ident(_, {txt=Lident p; _}, _); _}]) ->
           True, PointsTo (p, expr_to_term b)
       | _ -> Atomic (EQ, expr_to_term a, expr_to_term b), EmptyHeap
       end
@@ -206,7 +206,7 @@ let collect_param_info rhs =
           in
           match pat.pat_desc with
           | Tpat_var (_, {txt = name; _}, _) -> Some (name, pat.pat_type)
-          | Tpat_alias (_, _, {txt = name; _}, _) -> Some (name, pat.pat_type)
+          | Tpat_alias (_, _, {txt = name; _}, _, _) -> Some (name, pat.pat_type)
           (* unknown; getnerate a placeholder for this argument *)
           | _ -> Some ("_" ^ Variables.fresh_variable (), pat.pat_type)
         in
@@ -280,30 +280,30 @@ let rec transformation (bound_names:binder list) (expr:expression) : core_lang =
   (* shift and shift0 *)
   | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, args) when List.mem name ["shift"; "shift0"] ->
     begin match List.map snd args with
-    | [Some {exp_desc = Texp_function ([{ fp_param = k; fp_kind = Tparam_pat {pat_type; _}; _}], Tfunction_body body); _}] ->
+    | [Arg {exp_desc = Texp_function ([{ fp_param = k; fp_kind = Tparam_pat {pat_type; _}; _}], Tfunction_body body); _}] ->
       CShift (name = "shift", (Ident.name k, hip_type_of_type_expr pat_type), transformation bound_names body) |> clang_with_expr_type
     | _ ->  failwith "invalid shift args"
     end
   (* reset *)
   | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident "reset"; _}, _); _}, args) ->
     begin match args with
-    | [_, Some body] ->
+    | [_, Arg body] ->
       CReset (transformation bound_names body) |> clang_with_expr_type
     | _ ->  failwith "invalid reset args"
     end
   (* perform *)
-  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, [_, Some {exp_desc=Texp_construct ({txt=Lident eff; _}, _, args); _}]) when name = "!" ->
+  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, [_, Arg {exp_desc=Texp_construct ({txt=Lident eff; _}, _, args); _}]) when name = "!" ->
       begin match args with
       | a::_ -> transformation bound_names a |> maybe_var (fun v -> CPerform (eff, Some v) |> clang_with_expr_type)
       | [] -> CPerform (eff, None) |> clang_with_expr_type
     end
   (* continue *)
-  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, [_, Some _k; _, Some e]) when name = "continue" ->
+  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, [_, Arg _k; _, Arg e]) when name = "continue" ->
       transformation bound_names e |> maybe_var (fun v -> CResume [v] |> clang_with_expr_type)
 
   | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, args) when name = "continue" || name = "resume" ->
     (*print_endline (List.fold_left  (fun acc a -> acc ^ ", " ^ a) "" bound_names); *)
-    let args = List.filter_map (fun (label, arg) -> Option.map (fun arg -> (label, arg)) arg) args in
+    let args = List.filter_map (fun (label, arg) -> match arg with Arg a -> Some (label, a) | Omitted _ -> None) args in
     let rec loop vars args =
       match args with
       | [] -> CResume (List.rev vars) |> clang_with_expr_type
@@ -313,16 +313,16 @@ let rec transformation (bound_names:binder list) (expr:expression) : core_lang =
     loop [] args
   
   (* dereference *)
-  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, [_, Some {exp_desc=Texp_ident (_, {txt=Lident v;_}, _); _}]) when name = "!" ->
+  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, [_, Arg {exp_desc=Texp_ident (_, {txt=Lident v;_}, _); _}]) when name = "!" ->
       CRead v |> clang_with_expr_type
   (* ref *)
-  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, [_, Some addr]) when name = "ref" ->
+  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, [_, Arg addr]) when name = "ref" ->
       transformation bound_names addr |> maybe_var (fun v -> CRef v |> clang_with_expr_type)
   (* assign *)
-  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, [_, Some {exp_desc=Texp_ident (_, {txt=Lident addr;_}, _); _}; _, Some value]) when name = ":=" ->
+  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, [_, Arg {exp_desc=Texp_ident (_, {txt=Lident addr;_}, _); _}; _, Arg value]) when name = ":=" ->
       transformation bound_names value |> maybe_var (fun v -> {core_desc = CWrite (addr, v); core_type = Unit})
   (* transparent *)
-  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Ldot (Lident "Sys", "opaque_identity"); _}, _); _}, [_, Some a]) ->
+  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Ldot ({txt = Lident "Sys"; _}, {txt = "opaque_identity"; _}); _}, _); _}, [_, Arg a]) ->
     (* ignore this *)
     transformation bound_names a
   (* nil *)
@@ -347,14 +347,14 @@ let rec transformation (bound_names:binder list) (expr:expression) : core_lang =
     let rec loop vars args =
       match args with
       | [] -> CFunCall (name, List.rev vars) |> clang_with_expr_type
-      | (_, Some a) :: args1 ->
+      | (_, Arg a) :: args1 ->
         transformation bound_names a |> maybe_var (fun v -> loop (v :: vars) args1)
       (* skip over omitted arguments for now *)
-      | _ :: args1 -> loop vars args1
+      | (_, Omitted _) :: args1 -> loop vars args1
     in
     loop [] args
   (* assert with string argument *)
-  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, [_, Some {exp_desc = Texp_constant (Const_string (s, _, _)); _}]) 
+  | Texp_apply ({exp_desc = Texp_ident (_, {txt = Lident name; _}, _); _}, [_, Arg {exp_desc = Texp_constant (Const_string (s, _, _)); _}])
   when name = "assertf" ->
     let p, k = Annotation.parse_state s in
     (* typecheck the formula *)
@@ -368,9 +368,9 @@ let rec transformation (bound_names:binder list) (expr:expression) : core_lang =
       ) in
     {core_desc = CAssert (p, k); core_type = Unit}
   | Texp_apply (f, args) ->
-    let args = args |> List.filter_map (fun (label, expr) -> match expr with 
-      | Some value -> Some (label, value) 
-      | _ -> None) in
+    let args = args |> List.filter_map (fun (label, expr) -> match expr with
+      | Arg value -> Some (label, value)
+      | Omitted _ -> None) in
     (* handles both named/unknown function calls, e.g. printf, and applications of compound expressions, which get named *)
     let rec loop name vars args =
       match args with
@@ -460,7 +460,7 @@ let rec transformation (bound_names:binder list) (expr:expression) : core_lang =
                   let subpatterns = List.map transform_pattern args in
                   PConstr (String.concat "." (Longident.flatten constr), subpatterns)
               | Tpat_var (ident, _, _) -> (PVar (Ident.name ident, hip_type_of_type_expr pat.pat_type))
-              | Tpat_alias (pat, _, {txt = name; _}, _) -> PAlias (transform_pattern pat, name)
+              | Tpat_alias (pat, _, {txt = name; _}, _, _) -> PAlias (transform_pattern pat, name)
               | Tpat_any -> PAny
               | _ -> failwith (Format.asprintf "Unsupported pattern %a" Pprintast.pattern (Untypeast.untype_pattern pat))
               in

@@ -63,7 +63,7 @@ let rec string_of_core_type (p:core_type) :string =
     List.fold_left (fun acc a -> acc ^ a) "" (Longident.flatten l.txt)^
     List.fold_left (fun acc a -> acc ^ string_of_core_type a) "" c_li
   | Ptyp_tuple (ctLi) -> "(" ^
-    (List.fold_left (fun acc a -> acc ^ "," ^ string_of_core_type a ) "" ctLi) ^ ")"
+    (List.fold_left (fun acc (_, a) -> acc ^ "," ^ string_of_core_type a ) "" ctLi) ^ ")"
 
   | Ptyp_poly (str_li, c) ->
     "type " ^ List.fold_left (fun acc a -> acc ^ a.txt) "" str_li ^ ". " ^
@@ -280,7 +280,7 @@ let rec transformation (bound_names:string list) (expr:expression) : core_lang =
   | Pexp_apply ({pexp_desc = Pexp_ident ({txt = Lident name; _}); _}, [_, {pexp_desc = Pexp_ident {txt=Lident x; _}; _}; _, e]) when name = ":=" ->
     transformation bound_names e |> maybe_var (fun v -> CWrite (x, v))
   (* transparent *)
-  | Pexp_apply ({pexp_desc = Pexp_ident ({txt = Ldot (Lident "Sys", "opaque_identity"); _}); _}, [_, a]) ->
+  | Pexp_apply ({pexp_desc = Pexp_ident ({txt = Ldot ({txt = Lident "Sys"; _}, {txt = "opaque_identity"; _}); _}); _}, [_, a]) ->
     (* ignore this *)
     transformation bound_names a
   (* primitive or invocation of higher-order function passed as argument *)
@@ -291,7 +291,7 @@ let rec transformation (bound_names:string list) (expr:expression) : core_lang =
     let rec loop vars args =
       match args with
       | [] -> CFunCall (name, List.rev vars)
-      |  a :: args1 ->
+      | (_, a) :: args1 ->
         transformation bound_names a |> maybe_var (fun v -> loop (v :: vars) args1)
     in
     loop [] args
@@ -300,7 +300,7 @@ let rec transformation (bound_names:string list) (expr:expression) : core_lang =
   | Pexp_construct ({txt = Lident name; _}, exp) -> 
       let constr_args = match exp with
         | None -> []
-        | Some {pexp_desc = Pexp_tuple args; _} -> List.map expr_to_term args
+        | Some {pexp_desc = Pexp_tuple args; _} -> List.map (fun (_, e) -> expr_to_term e) args
         | Some expr -> [expr_to_term expr]
       in
       CValue (Construct (name, constr_args))
@@ -382,7 +382,7 @@ let rec transformation (bound_names:string list) (expr:expression) : core_lang =
       let rec transform_pattern pat =
         match pat.ppat_desc with
         | Ppat_construct ({txt = c; _}, None) -> Some (PConstr (Longident.last c, []))
-        | Ppat_construct ({txt = c; _}, Some ([], {ppat_desc = Ppat_tuple args; _})) -> Some (PConstr (Longident.last c, List.filter_map transform_pattern args))
+        | Ppat_construct ({txt = c; _}, Some ([], {ppat_desc = Ppat_tuple (args, _); _})) -> Some (PConstr (Longident.last c, List.filter_map (fun (_, p) -> transform_pattern p) args))
         | Ppat_var {txt = v; _} -> Some (PVar v)
         | Ppat_constant {pconst_desc = Pconst_string (s, _, _); _} -> Some (PConstant (TStr s))
         | Ppat_constant {pconst_desc = Pconst_integer (i, _); _} -> Some (PConstant (Num (int_of_string i)))
